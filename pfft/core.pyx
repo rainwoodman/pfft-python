@@ -54,6 +54,9 @@ cdef extern from 'pfft.h':
     int _PFFT_PADDED_R2C "PFFT_PADDED_R2C"
     int _PFFT_PADDED_C2R "PFFT_PADDED_C2R"
 
+    int  _FFTW_R2HC "FFTW_R2HC"
+    int  _FFTW_HC2R "FFTW_HC2R"
+
     void pfft_init()
     void pfftf_init()
     void pfft_cleanup()
@@ -96,7 +99,7 @@ cdef extern from 'pfft.h':
     pfft_plan pfft_plan_r2r(
             int rnk_n, numpy.intp_t *n, void * input, void * output, 
             cMPI.MPI_Comm ccart,
-            int sign, unsigned pfft_flags)
+            int * kinds, unsigned pfft_flags)
 
     pfft_plan pfftf_plan_dft(
             int rnk_n, numpy.intp_t *n, void * input, void * output, 
@@ -116,7 +119,7 @@ cdef extern from 'pfft.h':
     pfft_plan pfftf_plan_r2r(
             int rnk_n, numpy.intp_t *n, void * input, void * output, 
             cMPI.MPI_Comm ccart,
-            int sign, unsigned pfft_flags)
+            int * kinds, unsigned pfft_flags)
 
     int pfft_create_procmesh(int rnk_n, cMPI.MPI_Comm comm, int *np, 
             cMPI.MPI_Comm * ccart)
@@ -286,9 +289,11 @@ class Type(int):
         inverses = { Type.C2C : Type.C2C,
                      Type.R2C : Type.C2R,
                      Type.C2R : Type.R2C,
+                     Type.R2R : Type.R2R,
                      Type.C2CF : Type.C2CF,
                      Type.R2CF : Type.C2RF,
                      Type.C2RF : Type.R2CF,
+                     Type.R2RF : Type.R2RF,
                     }
         return inverses[self]
 
@@ -313,6 +318,12 @@ ctypedef pfft_plan (*pfft_plan_func) (
             int rnk_n, numpy.intp_t *n, void * input, void * output, 
             cMPI.MPI_Comm ccart,
             int sign, unsigned pfft_flags)
+
+ctypedef pfft_plan (*pfft_plan_func_r2r) (
+            int rnk_n, numpy.intp_t *n, void * input, void * output, 
+            cMPI.MPI_Comm ccart,
+            int * kinds, unsigned pfft_flags)
+
 cdef pfft_plan_func PFFT_PLAN_FUNC [8]
 
 PFFT_PLAN_FUNC[:] = [
@@ -866,7 +877,9 @@ cdef class Plan(object):
 
         self.flags = Flags(flags)
 
-        cdef pfft_plan_func func = PFFT_PLAN_FUNC[self.type]
+        cdef pfft_plan_func     plan_func = <pfft_plan_func>         PFFT_PLAN_FUNC[self.type]
+        cdef pfft_plan_func_r2r plan_func_r2r = <pfft_plan_func_r2r> PFFT_PLAN_FUNC[self.type]
+
         cdef numpy.intp_t [::1] n_ = numpy.array(n, dtype='intp')
         if o is None:
             o = i
@@ -883,10 +896,23 @@ cdef class Plan(object):
             raise NotImplementedError("out place non-padded r2c / c2r does not preserve input.(%s) " % repr(self.flags)
                                     + "Provide PFFT_DESTROY_INPUT as a flag and deal with this quirk.")
 
-        self.plan = func(n_.shape[0], &n_[0], i.ptr, o.ptr,
-                procmesh.ccart,
-                self.direction,
-                flags)
+        cdef int [::1] kinds = numpy.zeros(len(n), dtype='int32')
+
+        if direction == Direction.FORWARD:
+            kinds[...] = _FFTW_R2HC
+        else:
+            kinds[...] = _FFTW_HC2R
+
+        if self.type in (Type.R2R, Type.R2RF):
+            self.plan = plan_func_r2r(n_.shape[0], &n_[0], i.ptr, o.ptr,
+                    procmesh.ccart,
+                    &kinds[0],
+                    flags)
+        else:
+            self.plan = plan_func(n_.shape[0], &n_[0], i.ptr, o.ptr,
+                    procmesh.ccart,
+                    self.direction,
+                    flags)
         if not self.plan:
             raise ValueError("Plan is not created")
 
